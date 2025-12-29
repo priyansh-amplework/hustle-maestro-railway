@@ -1,10 +1,13 @@
 """
 click_tracking_railway.py - Click Tracking with Bot Detection for Railway
-Production-ready version without ngrok dependency
+FastAPI production-ready version
 """
 
-from flask import Flask, redirect, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, Dict, List
 import json
 import os
 from datetime import datetime
@@ -13,16 +16,25 @@ import hashlib
 import re
 import time
 
-app = Flask(__name__)
-CORS(app)
+app = FastAPI(
+    title="NoNAI Click Tracking",
+    description="Click tracking service with bot detection",
+    version="5.0_railway_fastapi"
+)
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration
 CLICKS_DB_FILE = "clicks_correct.json"
 FINAL_DESTINATION = "https://nonai.life/"
-PORT = int(os.getenv("PORT", 5000))  # Railway provides PORT env variable
-
-# Get the public URL from environment (Railway will set this)
-# You'll set this in Railway dashboard as RAILWAY_PUBLIC_DOMAIN
+PORT = int(os.getenv("PORT", 5000))
 PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
 
 # Bot/Preview user agents to IGNORE
@@ -38,7 +50,27 @@ BOT_USER_AGENTS = [
 # IPs to track for rate limiting
 ip_tracker = {}
 
-def is_bot_request(user_agent, ip=None):
+# Initialize data
+click_data = {
+    "total_clicks": 0,
+    "posts": {},
+    "click_history": [],
+    "bot_requests_blocked": 0
+}
+
+# Pydantic Models
+class TrackingURLRequest(BaseModel):
+    platform: str = "facebook"
+    badge_type: str = "gold"
+    username: str = "unknown"
+
+class UpdatePostRequest(BaseModel):
+    tracking_id: str
+    post_url: Optional[str] = None
+    username: Optional[str] = None
+
+# Helper Functions
+def is_bot_request(user_agent: str, ip: str = None) -> bool:
     """Check if request is from a bot/preview service."""
     if not user_agent:
         return True
@@ -63,7 +95,7 @@ def is_bot_request(user_agent, ip=None):
     
     return False
 
-def is_rate_limited(ip, tracking_id):
+def is_rate_limited(ip: str, tracking_id: str) -> bool:
     """Check if this IP is clicking too fast."""
     key = f"{ip}_{tracking_id}"
     current_time = time.time()
@@ -92,28 +124,17 @@ def clean_ip_tracker():
     for key in old_keys:
         del ip_tracker[key]
 
-def get_public_url():
+def get_public_url() -> str:
     """Get the public URL for this Railway deployment."""
     if PUBLIC_URL:
-        # Ensure it starts with https://
         url = PUBLIC_URL if PUBLIC_URL.startswith('http') else f"https://{PUBLIC_URL}"
         return url
     
-    # Fallback: try to construct from Railway environment variables
     railway_env = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN")
     if railway_env:
         return f"https://{railway_env}"
     
-    # Local development fallback
     return f"http://localhost:{PORT}"
-
-# Initialize data
-click_data = {
-    "total_clicks": 0,
-    "posts": {},
-    "click_history": [],
-    "bot_requests_blocked": 0
-}
 
 def load_data():
     """Load data from file."""
@@ -135,50 +156,66 @@ def save_data():
     with open(CLICKS_DB_FILE, 'w') as f:
         json.dump(click_data, f, indent=2)
 
-@app.route('/')
-def index():
+# Startup Event
+@app.on_event("startup")
+async def startup_event():
+    """Load data on startup."""
+    print("="*70)
+    print("🚂 CLICK TRACKING ON RAILWAY (FastAPI)")
+    print("="*70)
+    print(f"📍 Port: {PORT}")
+    print(f"🌐 Public URL: {get_public_url()}")
+    print(f"🎯 Redirects to: {FINAL_DESTINATION}")
+    
+    load_data()
+    
+    print(f"\n📊 Current Stats:")
+    print(f"   Total posts: {len(click_data['posts'])}")
+    print(f"   Total clicks: {click_data['total_clicks']}")
+    print(f"   Bot requests blocked: {click_data.get('bot_requests_blocked', 0)}")
+    print("="*70)
+
+# Routes
+@app.get("/")
+async def index():
     """Root endpoint."""
-    return jsonify({
+    return {
         "service": "NoNAI Click Tracking",
         "status": "running",
-        "version": "4.0_railway",
+        "version": "5.0_railway_fastapi",
         "public_url": get_public_url(),
         "endpoints": {
-            "track": "/track/<tracking_id>",
+            "track": "/track/{tracking_id}",
             "analytics": "/api/analytics",
             "health": "/health",
             "generate_url": "/api/generate-tracking-url (POST)",
             "public_url": "/api/public-url"
         }
-    })
+    }
 
-@app.route('/track/<tracking_id>')
-def track_click(tracking_id):
+@app.get("/track/{tracking_id}")
+async def track_click(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
     """Track clicks with BOT DETECTION."""
     try:
-        user_agent = request.headers.get('User-Agent', '')
-        ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        referer = request.headers.get('Referer', '')
+        user_agent = request.headers.get('user-agent', '')
+        ip = request.headers.get('x-forwarded-for', request.client.host)
         
         clean_ip_tracker()
         
         if is_bot_request(user_agent, ip):
             click_data["bot_requests_blocked"] += 1
             print(f"🤖 BLOCKED Bot/Preview: {tracking_id}")
-            return redirect(FINAL_DESTINATION, code=302)
+            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
         
         if is_rate_limited(ip, tracking_id):
             print(f"🚫 Rate limited: {tracking_id} from {ip}")
-            return redirect(FINAL_DESTINATION, code=302)
-        
-        platform = request.args.get('p', 'unknown')
-        badge_type = request.args.get('b', 'unknown')
+            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
         
         if tracking_id not in click_data["posts"]:
             click_data["posts"][tracking_id] = {
                 "clicks": 0,
-                "platform": platform,
-                "badge_type": badge_type,
+                "platform": p,
+                "badge_type": b,
                 "username": "unknown",
                 "post_url": "",
                 "first_click": None,
@@ -197,9 +234,9 @@ def track_click(tracking_id):
         click_record = {
             "tracking_id": tracking_id,
             "timestamp": now,
-            "platform": platform,
-            "badge_type": badge_type,
-            "ip": ip[:15],
+            "platform": p,
+            "badge_type": b,
+            "ip": ip[:15] if ip else "unknown",
             "user_agent": user_agent[:30],
             "is_human": True
         }
@@ -214,31 +251,25 @@ def track_click(tracking_id):
         print(f"🖱️ REAL HUMAN CLICK #{click_data['total_clicks']}")
         print(f"   Tracking ID: {tracking_id}, Clicks: {current_clicks}")
         
-        return redirect(FINAL_DESTINATION, code=302)
+        return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
         
     except Exception as e:
         print(f"❌ Error: {e}")
-        return redirect(FINAL_DESTINATION, code=302)
+        return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
 
-@app.route('/api/generate-tracking-url', methods=['POST'])
-def generate_tracking_url():
+@app.post("/api/generate-tracking-url")
+async def generate_tracking_url(data: TrackingURLRequest):
     """Generate tracking URL using Railway public domain."""
     try:
-        data = request.json
-        
-        platform = data.get('platform', 'facebook')
-        badge_type = data.get('badge_type', 'gold')
-        username = data.get('username', 'unknown')
-        
         tracking_id = hashlib.md5(
-            f"{platform}_{badge_type}_{datetime.now().timestamp()}_{os.urandom(4).hex()}".encode()
+            f"{data.platform}_{data.badge_type}_{datetime.now().timestamp()}_{os.urandom(4).hex()}".encode()
         ).hexdigest()[:8]
         
         click_data["posts"][tracking_id] = {
             "clicks": 0,
-            "platform": platform,
-            "badge_type": badge_type,
-            "username": username,
+            "platform": data.platform,
+            "badge_type": data.badge_type,
+            "username": data.username,
             "post_url": "",
             "first_click": None,
             "last_click": None,
@@ -247,63 +278,62 @@ def generate_tracking_url():
         
         save_data()
         
-        params = {'p': platform[:3], 'b': badge_type[:1]}
+        params = {'p': data.platform[:3], 'b': data.badge_type[:1]}
         public_url = get_public_url()
         tracking_url = f"{public_url}/track/{tracking_id}?{urlencode(params)}"
         
         print(f"📝 Generated tracking URL: {tracking_id}")
         print(f"   Public URL: {public_url}")
         
-        return jsonify({
+        return {
             "tracking_id": tracking_id,
             "tracking_url": tracking_url,
             "public_url": public_url,
             "post_info": {
-                "platform": platform,
-                "badge_type": badge_type,
-                "username": username,
+                "platform": data.platform,
+                "badge_type": data.badge_type,
+                "username": data.username,
                 "tracking_id": tracking_id,
                 "initial_clicks": 0
             }
-        })
+        }
         
     except Exception as e:
         print(f"❌ Error generating URL: {e}")
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.route('/api/update-post-info', methods=['POST'])
-def update_post_info():
+@app.post("/api/update-post-info")
+async def update_post_info(data: UpdatePostRequest):
     """Update post with actual info."""
     try:
-        data = request.json
-        tracking_id = data.get('tracking_id')
-        
-        if not tracking_id or tracking_id not in click_data["posts"]:
-            return jsonify({"error": "Invalid tracking ID"}), 404
+        if not data.tracking_id or data.tracking_id not in click_data["posts"]:
+            raise HTTPException(status_code=404, detail="Invalid tracking ID")
         
         updates = {}
-        if 'post_url' in data:
-            click_data["posts"][tracking_id]["post_url"] = data['post_url']
-            updates['post_url'] = data['post_url']
+        if data.post_url:
+            click_data["posts"][data.tracking_id]["post_url"] = data.post_url
+            updates['post_url'] = data.post_url
         
-        if 'username' in data and data['username'] != 'unknown':
-            click_data["posts"][tracking_id]["username"] = data['username']
-            updates['username'] = data['username']
+        if data.username and data.username != 'unknown':
+            click_data["posts"][data.tracking_id]["username"] = data.username
+            updates['username'] = data.username
         
         save_data()
         
-        return jsonify({
+        return {
             "status": "success",
-            "tracking_id": tracking_id,
-            "current_clicks": click_data["posts"][tracking_id]["clicks"],
+            "tracking_id": data.tracking_id,
+            "current_clicks": click_data["posts"][data.tracking_id]["clicks"],
             "updates": updates
-        })
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.route('/api/analytics', methods=['GET'])
-def get_analytics():
+@app.get("/api/analytics")
+async def get_analytics():
     """Get analytics with bot detection stats."""
     try:
         posts_list = []
@@ -342,7 +372,7 @@ def get_analytics():
             if click.get("is_human", False)
         ]
         
-        return jsonify({
+        return {
             "total_clicks": total_clicks,
             "total_posts": len(posts_list),
             "clicks_by_platform": platform_stats,
@@ -356,26 +386,26 @@ def get_analytics():
                 "bot_requests_blocked": click_data.get("bot_requests_blocked", 0),
                 "total_requests": total_clicks + click_data.get("bot_requests_blocked", 0)
             }
-        })
+        }
         
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.route('/api/public-url', methods=['GET'])
-def get_public_url_endpoint():
+@app.get("/api/public-url")
+async def get_public_url_endpoint():
     """Get the current public Railway URL."""
     public_url = get_public_url()
     
-    return jsonify({
+    return {
         "public_url": public_url,
         "is_railway": "railway" in public_url.lower() or PUBLIC_URL != "",
         "status": "online",
         "message": "Production URL ready for social media posts",
         "final_destination": FINAL_DESTINATION
-    })
+    }
 
-@app.route('/api/debug/<tracking_id>', methods=['GET'])
-def debug_tracking(tracking_id):
+@app.get("/api/debug/{tracking_id}")
+async def debug_tracking(tracking_id: str):
     """Debug specific tracking ID."""
     if tracking_id in click_data["posts"]:
         post_data = click_data["posts"][tracking_id]
@@ -384,18 +414,18 @@ def debug_tracking(tracking_id):
             if c.get("tracking_id") == tracking_id and c.get("is_human", False)
         ])
         
-        return jsonify({
+        return {
             "tracking_id": tracking_id,
             "post_data": post_data,
             "history_clicks_count": history_clicks,
             "stored_clicks": post_data.get("clicks", 0),
             "matches": history_clicks == post_data.get("clicks", 0)
-        })
+        }
     
-    return jsonify({"error": "Not found"}), 404
+    raise HTTPException(status_code=404, detail="Not found")
 
-@app.route('/api/reset-all', methods=['POST'])
-def reset_all():
+@app.post("/api/reset-all")
+async def reset_all():
     """Reset ALL data."""
     global click_data, ip_tracker
     click_data = {
@@ -406,19 +436,19 @@ def reset_all():
     }
     ip_tracker = {}
     save_data()
-    return jsonify({
+    return {
         "status": "success", 
         "message": "All data reset",
         "total_clicks": 0,
         "total_posts": 0
-    })
+    }
 
-@app.route('/health', methods=['GET'])
-def health():
+@app.get("/health")
+async def health():
     """Health check for Railway."""
     public_url = get_public_url()
     
-    return jsonify({
+    return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "total_posts": len(click_data["posts"]),
@@ -426,18 +456,18 @@ def health():
         "bot_requests_blocked": click_data.get("bot_requests_blocked", 0),
         "public_url": public_url,
         "is_production": PUBLIC_URL != "",
-        "version": "4.0_railway"
-    })
+        "version": "5.0_railway_fastapi"
+    }
 
-@app.route('/api/test-bot-detection', methods=['GET'])
-def test_bot_detection():
+@app.get("/api/test-bot-detection")
+async def test_bot_detection(request: Request):
     """Test if bot detection is working."""
-    user_agent = request.headers.get('User-Agent', '')
-    ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    user_agent = request.headers.get('user-agent', '')
+    ip = request.headers.get('x-forwarded-for', request.client.host)
     
     is_bot = is_bot_request(user_agent, ip)
     
-    return jsonify({
+    return {
         "user_agent": user_agent,
         "ip": ip,
         "is_bot": is_bot,
@@ -445,23 +475,4 @@ def test_bot_detection():
             indicator for indicator in BOT_USER_AGENTS 
             if indicator.lower() in user_agent.lower()
         ]
-    })
-
-if __name__ == '__main__':
-    print("="*70)
-    print("🚂 CLICK TRACKING ON RAILWAY")
-    print("="*70)
-    print(f"📍 Port: {PORT}")
-    print(f"🌐 Public URL: {get_public_url()}")
-    print(f"🎯 Redirects to: {FINAL_DESTINATION}")
-    
-    load_data()
-    
-    print(f"\n📊 Current Stats:")
-    print(f"   Total posts: {len(click_data['posts'])}")
-    print(f"   Total clicks: {click_data['total_clicks']}")
-    print(f"   Bot requests blocked: {click_data.get('bot_requests_blocked', 0)}")
-    print("="*70)
-    
-    # Railway automatically handles the host binding
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    }
