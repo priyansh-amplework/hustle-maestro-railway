@@ -460,116 +460,119 @@ async def get_analytics():
 
 @app.get("/api/analytics")
 async def get_analytics():
-    """
-    Get comprehensive analytics including ALL posts (with and without clicks).
-    """
-    global post_clicks, confirmed_posts
-    
-    # Calculate stats
-    total_clicks = sum(len(clicks) for clicks in post_clicks.values())
-    unique_users = len(set(
-        click.get('user_id', 'unknown') 
-        for clicks in post_clicks.values() 
-        for click in clicks
-    ))
-    
-    # Count clicks by platform
-    clicks_by_platform = {}
-    for tracking_id, clicks in post_clicks.items():
-        post = confirmed_posts.get(tracking_id, {})
-        platform = post.get('platform', 'unknown')
-        clicks_by_platform[platform] = clicks_by_platform.get(platform, 0) + len(clicks)
-    
-    # Count clicks by badge type
-    clicks_by_badge_type = {}
-    for tracking_id, clicks in post_clicks.items():
-        post = confirmed_posts.get(tracking_id, {})
-        badge_type = post.get('badge_type', 'unknown')
-        clicks_by_badge_type[badge_type] = clicks_by_badge_type.get(badge_type, 0) + len(clicks)
-    
-    # Get top posts
-    top_posts = []
-    for tracking_id, clicks in post_clicks.items():
-        post = confirmed_posts.get(tracking_id, {})
-        if post:
-            click_count = len(clicks)
-            first_click = min(click['timestamp'] for click in clicks) if clicks else None
-            last_click = max(click['timestamp'] for click in clicks) if clicks else None
-            
+    """Get comprehensive analytics including ALL posts (confirmed only)."""
+    try:
+        # Filter only confirmed posts
+        confirmed_posts_list = {
+            tid: data for tid, data in click_data["posts"].items() 
+            if data.get("confirmed", False)
+        }
+        
+        # Calculate total clicks from confirmed posts only
+        total_clicks = sum(post.get("clicks", 0) for post in confirmed_posts_list.values())
+        
+        # Count posts with and without clicks
+        posts_with_clicks = sum(1 for post in confirmed_posts_list.values() if post.get("clicks", 0) > 0)
+        posts_without_clicks = len(confirmed_posts_list) - posts_with_clicks
+        
+        # Count clicks by platform
+        clicks_by_platform = {}
+        for post_data in confirmed_posts_list.values():
+            platform = post_data.get('platform', 'unknown')
+            clicks_by_platform[platform] = clicks_by_platform.get(platform, 0) + post_data.get('clicks', 0)
+        
+        # Count clicks by badge type
+        clicks_by_badge_type = {}
+        for post_data in confirmed_posts_list.values():
+            badge_type = post_data.get('badge_type', 'unknown')
+            clicks_by_badge_type[badge_type] = clicks_by_badge_type.get(badge_type, 0) + post_data.get('clicks', 0)
+        
+        # Build top posts list
+        top_posts = []
+        for tracking_id, post_data in confirmed_posts_list.items():
             top_posts.append({
                 'tracking_id': tracking_id,
-                'post_url': post.get('post_url', 'N/A'),
-                'platform': post.get('platform', 'unknown'),
-                'badge_type': post.get('badge_type', 'unknown'),
-                'username': post.get('username', 'Unknown'),
-                'clicks': click_count,
-                'first_click': first_click,
-                'last_click': last_click
+                'post_url': post_data.get('post_url', 'N/A'),
+                'platform': post_data.get('platform', 'unknown'),
+                'badge_type': post_data.get('badge_type', 'unknown'),
+                'clicks': post_data.get('clicks', 0),
+                'posted_at': post_data.get('confirmed_at', post_data.get('created_at', 'N/A')),
+                'first_click': post_data.get('first_click'),
+                'last_click': post_data.get('last_click'),
+                'status': 'active' if post_data.get('clicks', 0) > 0 else 'no_clicks'
             })
-    
-    # Sort by clicks
-    top_posts.sort(key=lambda x: x['clicks'], reverse=True)
-    
-    # Get recent clicks (last 20)
-    recent_clicks = []
-    for tracking_id, clicks in post_clicks.items():
-        post = confirmed_posts.get(tracking_id, {})
-        for click in clicks[-20:]:  # Last 20 clicks for this post
-            recent_clicks.append({
-                'timestamp': click['timestamp'],
+        
+        # Sort all posts by posted_at (most recent first)
+        all_posts.sort(key=lambda x: x.get('posted_at', ''), reverse=True)
+        
+        # Count pending posts (not confirmed)
+        pending_posts = sum(1 for p in click_data["posts"].values() if not p.get("confirmed", False))
+        
+        return {
+            'total_clicks': total_clicks,
+            'total_posts': len(confirmed_posts_list),
+            'pending_posts': pending_posts,
+            'posts_with_clicks': posts_with_clicks,
+            'posts_without_clicks': posts_without_clicks,
+            'avg_clicks_per_post': total_clicks / len(confirmed_posts_list) if confirmed_posts_list else 0,
+            'clicks_by_platform': clicks_by_platform,
+            'clicks_by_badge_type': clicks_by_badge_type,
+            'top_posts': top_posts[:50],  # Top 50 posts by clicks
+            'recent_clicks': recent_clicks[:20],  # Last 20 human clicks
+            'all_posts': all_posts,  # All confirmed posts with full details
+            'bot_requests_blocked': click_data.get("bot_requests_blocked", 0),
+            'stats': {
+                'human_clicks': total_clicks,
+                'bot_requests_blocked': click_data.get("bot_requests_blocked", 0),
+                'total_requests': total_clicks + click_data.get("bot_requests_blocked", 0),
+                'confirmed_posts': len(confirmed_posts_list),
+                'pending_posts': pending_posts
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Analytics error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))badge_type': post_data.get('badge_type', 'unknown'),
+                'username': post_data.get('username', 'Unknown'),
+                'clicks': post_data.get('clicks', 0),
+                'first_click': post_data.get('first_click'),
+                'last_click': post_data.get('last_click'),
+                'created_at': post_data.get('created_at')
+            })
+        
+        # Sort by clicks (descending)
+        top_posts.sort(key=lambda x: x['clicks'], reverse=True)
+        
+        # Get recent clicks from history (only human clicks)
+        recent_clicks = []
+        for click in reversed(click_data.get("click_history", [])[-50:]):
+            if click.get("is_human", False):
+                tracking_id = click.get("tracking_id")
+                post_data = confirmed_posts_list.get(tracking_id, {})
+                
+                recent_clicks.append({
+                    'timestamp': click.get('timestamp'),
+                    'tracking_id': tracking_id,
+                    'post_url': post_data.get('post_url', 'N/A'),
+                    'platform': click.get('platform', 'unknown'),
+                    'badge_type': click.get('badge_type', 'unknown'),
+                    'username': post_data.get('username', 'Unknown')
+                })
+                
+                if len(recent_clicks) >= 20:
+                    break
+        
+        # Build all_posts list (including posts with 0 clicks)
+        all_posts = []
+        for tracking_id, post_data in confirmed_posts_list.items():
+            all_posts.append({
                 'tracking_id': tracking_id,
-                'post_url': post.get('post_url', 'N/A'),
-                'platform': post.get('platform', 'unknown'),
-                'badge_type': post.get('badge_type', 'unknown'),
-                'username': post.get('username', 'Unknown'),
-                'user_id': click.get('user_id', 'Unknown')
-            })
-    
-    # Sort by timestamp
-    recent_clicks.sort(key=lambda x: x['timestamp'], reverse=True)
-    
-    # NEW: Get ALL confirmed posts (including those with 0 clicks)
-    all_posts = []
-    for tracking_id, post in confirmed_posts.items():
-        click_count = len(post_clicks.get(tracking_id, []))
-        first_click = None
-        last_click = None
-        
-        if click_count > 0:
-            clicks = post_clicks.get(tracking_id, [])
-            first_click = min(click['timestamp'] for click in clicks)
-            last_click = max(click['timestamp'] for click in clicks)
-        
-        all_posts.append({
-            'tracking_id': tracking_id,
-            'username': post.get('username', 'Unknown'),
-            'post_url': post.get('post_url', 'N/A'),
-            'platform': post.get('platform', 'unknown'),
-            'badge_type': post.get('badge_type', 'unknown'),
-            'clicks': click_count,
-            'posted_at': post.get('confirmed_at', 'N/A'),
-            'first_click': first_click,
-            'last_click': last_click,
-            'status': 'active' if click_count > 0 else 'no_clicks'
-        })
-    
-    # Sort all posts by posted_at (most recent first)
-    all_posts.sort(key=lambda x: x.get('posted_at', ''), reverse=True)
-    
-    return {
-        'total_clicks': total_clicks,
-        'unique_users': unique_users,
-        'total_posts': len(confirmed_posts),
-        'posts_with_clicks': len(top_posts),
-        'posts_without_clicks': len(confirmed_posts) - len(top_posts),
-        'avg_clicks_per_post': total_clicks / len(confirmed_posts) if confirmed_posts else 0,
-        'clicks_by_platform': clicks_by_platform,
-        'clicks_by_badge_type': clicks_by_badge_type,
-        'top_posts': top_posts[:50],  # Top 50 posts
-        'recent_clicks': recent_clicks[:20],  # Last 20 clicks
-        'all_posts': all_posts  # NEW: All posts with full details
-    }
-
+                'username': post_data.get('username', 'Unknown'),
+                'post_url': post_data.get('post_url', 'N/A'),
+                'platform': post_data.get('platform', 'unknown'),
+                '
 @app.get("/api/public-url")
 async def get_public_url_endpoint():
     """Get the current public Railway URL."""
