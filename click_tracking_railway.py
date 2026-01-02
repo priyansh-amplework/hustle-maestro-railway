@@ -1,6 +1,6 @@
 """
-click_tracking_railway.py - Click Tracking with Bot Detection for Railway
-FastAPI production-ready version
+click_tracking_railway.py - FIXED VERSION
+Only tracks successful posts & uses correct Railway URL
 """
 
 from fastapi import FastAPI, Request, HTTPException
@@ -19,7 +19,7 @@ import time
 app = FastAPI(
     title="NoNAI Click Tracking",
     description="Click tracking service with bot detection",
-    version="5.0_railway_fastapi"
+    version="5.1_railway_fixed"
 )
 
 # CORS Configuration
@@ -35,7 +35,26 @@ app.add_middleware(
 CLICKS_DB_FILE = "clicks_correct.json"
 FINAL_DESTINATION = "https://nonai.life/"
 PORT = int(os.getenv("PORT", 5000))
-PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+
+# FIXED: Better Railway URL detection
+def get_railway_url():
+    """Get Railway public URL - FIXED VERSION"""
+    # Check Railway environment variables in order of priority
+    railway_domain = (
+        os.getenv("RAILWAY_PUBLIC_DOMAIN") or 
+        os.getenv("RAILWAY_STATIC_URL") or
+        os.getenv("RAILWAY_SERVICE_URL")
+    )
+    
+    if railway_domain:
+        # Remove any existing protocol
+        railway_domain = railway_domain.replace("https://", "").replace("http://", "")
+        return f"https://{railway_domain}"
+    
+    # Fallback for local development only
+    return f"http://localhost:{PORT}"
+
+PUBLIC_URL = get_railway_url()
 
 # Bot/Preview user agents to IGNORE
 BOT_USER_AGENTS = [
@@ -67,6 +86,13 @@ class TrackingURLRequest(BaseModel):
 class UpdatePostRequest(BaseModel):
     tracking_id: str
     post_url: Optional[str] = None
+    username: Optional[str] = None
+
+class ConfirmPostRequest(BaseModel):
+    """NEW: Confirm a post was successful"""
+    tracking_id: str
+    post_url: str
+    platform: str
     username: Optional[str] = None
 
 # Helper Functions
@@ -124,18 +150,6 @@ def clean_ip_tracker():
     for key in old_keys:
         del ip_tracker[key]
 
-def get_public_url() -> str:
-    """Get the public URL for this Railway deployment."""
-    if PUBLIC_URL:
-        url = PUBLIC_URL if PUBLIC_URL.startswith('http') else f"https://{PUBLIC_URL}"
-        return url
-    
-    railway_env = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN")
-    if railway_env:
-        return f"https://{railway_env}"
-    
-    return f"http://localhost:{PORT}"
-
 def load_data():
     """Load data from file."""
     global click_data
@@ -161,11 +175,12 @@ def save_data():
 async def startup_event():
     """Load data on startup."""
     print("="*70)
-    print("🚂 CLICK TRACKING ON RAILWAY (FastAPI)")
+    print("🚂 CLICK TRACKING ON RAILWAY (FIXED VERSION)")
     print("="*70)
     print(f"📍 Port: {PORT}")
-    print(f"🌐 Public URL: {get_public_url()}")
+    print(f"🌐 Public URL: {PUBLIC_URL}")
     print(f"🎯 Redirects to: {FINAL_DESTINATION}")
+    print(f"🔧 Railway Domain: {os.getenv('RAILWAY_PUBLIC_DOMAIN', 'Not set')}")
     
     load_data()
     
@@ -182,20 +197,21 @@ async def index():
     return {
         "service": "NoNAI Click Tracking",
         "status": "running",
-        "version": "5.0_railway_fastapi",
-        "public_url": get_public_url(),
+        "version": "5.1_railway_fixed",
+        "public_url": PUBLIC_URL,
         "endpoints": {
             "track": "/track/{tracking_id}",
             "analytics": "/api/analytics",
             "health": "/health",
             "generate_url": "/api/generate-tracking-url (POST)",
+            "confirm_post": "/api/confirm-post (POST)",
             "public_url": "/api/public-url"
         }
     }
 
 @app.get("/track/{tracking_id}")
 async def track_click(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
-    """Track clicks with BOT DETECTION."""
+    """Track clicks with BOT DETECTION - Only for confirmed posts."""
     try:
         user_agent = request.headers.get('user-agent', '')
         ip = request.headers.get('x-forwarded-for', request.client.host)
@@ -211,17 +227,15 @@ async def track_click(tracking_id: str, request: Request, p: str = "unknown", b:
             print(f"🚫 Rate limited: {tracking_id} from {ip}")
             return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
         
+        # FIXED: Only track if post was confirmed as successful
         if tracking_id not in click_data["posts"]:
-            click_data["posts"][tracking_id] = {
-                "clicks": 0,
-                "platform": p,
-                "badge_type": b,
-                "username": "unknown",
-                "post_url": "",
-                "first_click": None,
-                "last_click": None,
-                "created_at": datetime.now().isoformat()
-            }
+            print(f"⚠️ Tracking ID not found or post not confirmed: {tracking_id}")
+            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
+        
+        # Check if post is confirmed
+        if not click_data["posts"][tracking_id].get("confirmed", False):
+            print(f"⚠️ Post not confirmed yet: {tracking_id}")
+            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
         
         click_data["posts"][tracking_id]["clicks"] += 1
         click_data["total_clicks"] += 1
@@ -259,18 +273,20 @@ async def track_click(tracking_id: str, request: Request, p: str = "unknown", b:
 
 @app.post("/api/generate-tracking-url")
 async def generate_tracking_url(data: TrackingURLRequest):
-    """Generate tracking URL using Railway public domain."""
+    """Generate tracking URL - PENDING until confirmed."""
     try:
         tracking_id = hashlib.md5(
             f"{data.platform}_{data.badge_type}_{datetime.now().timestamp()}_{os.urandom(4).hex()}".encode()
         ).hexdigest()[:8]
         
+        # Create post but mark as NOT confirmed yet
         click_data["posts"][tracking_id] = {
             "clicks": 0,
             "platform": data.platform,
             "badge_type": data.badge_type,
             "username": data.username,
             "post_url": "",
+            "confirmed": False,  # FIXED: Add confirmation flag
             "first_click": None,
             "last_click": None,
             "created_at": datetime.now().isoformat()
@@ -279,27 +295,64 @@ async def generate_tracking_url(data: TrackingURLRequest):
         save_data()
         
         params = {'p': data.platform[:3], 'b': data.badge_type[:1]}
-        public_url = get_public_url()
-        tracking_url = f"{public_url}/track/{tracking_id}?{urlencode(params)}"
+        tracking_url = f"{PUBLIC_URL}/track/{tracking_id}?{urlencode(params)}"
         
-        print(f"📝 Generated tracking URL: {tracking_id}")
-        print(f"   Public URL: {public_url}")
+        print(f"📝 Generated tracking URL (pending confirmation): {tracking_id}")
+        print(f"   Public URL: {PUBLIC_URL}")
         
         return {
             "tracking_id": tracking_id,
             "tracking_url": tracking_url,
-            "public_url": public_url,
+            "public_url": PUBLIC_URL,
             "post_info": {
                 "platform": data.platform,
                 "badge_type": data.badge_type,
                 "username": data.username,
                 "tracking_id": tracking_id,
-                "initial_clicks": 0
+                "initial_clicks": 0,
+                "confirmed": False
             }
         }
         
     except Exception as e:
         print(f"❌ Error generating URL: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/confirm-post")
+async def confirm_post(data: ConfirmPostRequest):
+    """NEW: Confirm a post was successfully published."""
+    try:
+        if data.tracking_id not in click_data["posts"]:
+            raise HTTPException(status_code=404, detail="Tracking ID not found")
+        
+        # Update post with real URL and mark as confirmed
+        click_data["posts"][data.tracking_id].update({
+            "post_url": data.post_url,
+            "confirmed": True,
+            "confirmed_at": datetime.now().isoformat(),
+            "platform": data.platform
+        })
+        
+        if data.username and data.username != 'unknown':
+            click_data["posts"][data.tracking_id]["username"] = data.username
+        
+        save_data()
+        
+        print(f"✅ Post confirmed: {data.tracking_id}")
+        print(f"   URL: {data.post_url}")
+        print(f"   Platform: {data.platform}")
+        
+        return {
+            "status": "success",
+            "tracking_id": data.tracking_id,
+            "post_url": data.post_url,
+            "confirmed": True,
+            "message": "Post confirmed and ready for tracking"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/update-post-info")
@@ -332,23 +385,25 @@ async def update_post_info(data: UpdatePostRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/analytics")
+"""@app.get("/api/analytics")
 async def get_analytics():
-    """Get analytics with bot detection stats."""
+    #Get analytics - ONLY confirmed posts.
     try:
+        # FIXED: Only include confirmed posts
         posts_list = []
         for tracking_id, post_data in click_data["posts"].items():
-            posts_list.append({
-                "tracking_id": tracking_id,
-                "clicks": post_data.get("clicks", 0),
-                "platform": post_data.get("platform", "unknown"),
-                "badge_type": post_data.get("badge_type", "unknown"),
-                "username": post_data.get("username", "unknown"),
-                "post_url": post_data.get("post_url", ""),
-                "first_click": post_data.get("first_click"),
-                "last_click": post_data.get("last_click"),
-                "created_at": post_data.get("created_at")
-            })
+            if post_data.get("confirmed", False):  # Only confirmed posts
+                posts_list.append({
+                    "tracking_id": tracking_id,
+                    "clicks": post_data.get("clicks", 0),
+                    "platform": post_data.get("platform", "unknown"),
+                    "badge_type": post_data.get("badge_type", "unknown"),
+                    "username": post_data.get("username", "unknown"),
+                    "post_url": post_data.get("post_url", ""),
+                    "first_click": post_data.get("first_click"),
+                    "last_click": post_data.get("last_click"),
+                    "created_at": post_data.get("created_at")
+                })
         
         posts_list.sort(key=lambda x: x["clicks"], reverse=True)
         total_clicks = sum(p["clicks"] for p in posts_list)
@@ -366,15 +421,21 @@ async def get_analytics():
                 "timestamp": click.get("timestamp"),
                 "tracking_id": click.get("tracking_id"),
                 "platform": click.get("platform", "unknown"),
-                "badge_type": click.get("badge_type", "unknown")
+                "badge_type": click.get("badge_type", "unknown"),
+                "post_url": click_data["posts"].get(click.get("tracking_id"), {}).get("post_url", ""),
+                "username": click_data["posts"].get(click.get("tracking_id"), {}).get("username", "unknown")
             }
             for click in click_data["click_history"][-20:]
             if click.get("is_human", False)
         ]
         
+        # Count pending posts
+        pending_posts = sum(1 for p in click_data["posts"].values() if not p.get("confirmed", False))
+        
         return {
             "total_clicks": total_clicks,
             "total_posts": len(posts_list),
+            "pending_posts": pending_posts,
             "clicks_by_platform": platform_stats,
             "clicks_by_badge_type": badge_stats,
             "top_posts": posts_list[:20],
@@ -384,24 +445,145 @@ async def get_analytics():
             "stats": {
                 "human_clicks": total_clicks,
                 "bot_requests_blocked": click_data.get("bot_requests_blocked", 0),
-                "total_requests": total_clicks + click_data.get("bot_requests_blocked", 0)
+                "total_requests": total_clicks + click_data.get("bot_requests_blocked", 0),
+                "confirmed_posts": len(posts_list),
+                "pending_posts": pending_posts
             }
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))"""
+
+# Add this to your click_tracking_fixed.py or tracking server
+
+# Update the /api/analytics endpoint to include all_posts
+
+@app.get("/api/analytics")
+async def get_analytics():
+    """
+    Get comprehensive analytics including ALL posts (with and without clicks).
+    """
+    global post_clicks, confirmed_posts
+    
+    # Calculate stats
+    total_clicks = sum(len(clicks) for clicks in post_clicks.values())
+    unique_users = len(set(
+        click.get('user_id', 'unknown') 
+        for clicks in post_clicks.values() 
+        for click in clicks
+    ))
+    
+    # Count clicks by platform
+    clicks_by_platform = {}
+    for tracking_id, clicks in post_clicks.items():
+        post = confirmed_posts.get(tracking_id, {})
+        platform = post.get('platform', 'unknown')
+        clicks_by_platform[platform] = clicks_by_platform.get(platform, 0) + len(clicks)
+    
+    # Count clicks by badge type
+    clicks_by_badge_type = {}
+    for tracking_id, clicks in post_clicks.items():
+        post = confirmed_posts.get(tracking_id, {})
+        badge_type = post.get('badge_type', 'unknown')
+        clicks_by_badge_type[badge_type] = clicks_by_badge_type.get(badge_type, 0) + len(clicks)
+    
+    # Get top posts
+    top_posts = []
+    for tracking_id, clicks in post_clicks.items():
+        post = confirmed_posts.get(tracking_id, {})
+        if post:
+            click_count = len(clicks)
+            first_click = min(click['timestamp'] for click in clicks) if clicks else None
+            last_click = max(click['timestamp'] for click in clicks) if clicks else None
+            
+            top_posts.append({
+                'tracking_id': tracking_id,
+                'post_url': post.get('post_url', 'N/A'),
+                'platform': post.get('platform', 'unknown'),
+                'badge_type': post.get('badge_type', 'unknown'),
+                'username': post.get('username', 'Unknown'),
+                'clicks': click_count,
+                'first_click': first_click,
+                'last_click': last_click
+            })
+    
+    # Sort by clicks
+    top_posts.sort(key=lambda x: x['clicks'], reverse=True)
+    
+    # Get recent clicks (last 20)
+    recent_clicks = []
+    for tracking_id, clicks in post_clicks.items():
+        post = confirmed_posts.get(tracking_id, {})
+        for click in clicks[-20:]:  # Last 20 clicks for this post
+            recent_clicks.append({
+                'timestamp': click['timestamp'],
+                'tracking_id': tracking_id,
+                'post_url': post.get('post_url', 'N/A'),
+                'platform': post.get('platform', 'unknown'),
+                'badge_type': post.get('badge_type', 'unknown'),
+                'username': post.get('username', 'Unknown'),
+                'user_id': click.get('user_id', 'Unknown')
+            })
+    
+    # Sort by timestamp
+    recent_clicks.sort(key=lambda x: x['timestamp'], reverse=True)
+    
+    # NEW: Get ALL confirmed posts (including those with 0 clicks)
+    all_posts = []
+    for tracking_id, post in confirmed_posts.items():
+        click_count = len(post_clicks.get(tracking_id, []))
+        first_click = None
+        last_click = None
+        
+        if click_count > 0:
+            clicks = post_clicks.get(tracking_id, [])
+            first_click = min(click['timestamp'] for click in clicks)
+            last_click = max(click['timestamp'] for click in clicks)
+        
+        all_posts.append({
+            'tracking_id': tracking_id,
+            'username': post.get('username', 'Unknown'),
+            'post_url': post.get('post_url', 'N/A'),
+            'platform': post.get('platform', 'unknown'),
+            'badge_type': post.get('badge_type', 'unknown'),
+            'clicks': click_count,
+            'posted_at': post.get('confirmed_at', 'N/A'),
+            'first_click': first_click,
+            'last_click': last_click,
+            'status': 'active' if click_count > 0 else 'no_clicks'
+        })
+    
+    # Sort all posts by posted_at (most recent first)
+    all_posts.sort(key=lambda x: x.get('posted_at', ''), reverse=True)
+    
+    return {
+        'total_clicks': total_clicks,
+        'unique_users': unique_users,
+        'total_posts': len(confirmed_posts),
+        'posts_with_clicks': len(top_posts),
+        'posts_without_clicks': len(confirmed_posts) - len(top_posts),
+        'avg_clicks_per_post': total_clicks / len(confirmed_posts) if confirmed_posts else 0,
+        'clicks_by_platform': clicks_by_platform,
+        'clicks_by_badge_type': clicks_by_badge_type,
+        'top_posts': top_posts[:50],  # Top 50 posts
+        'recent_clicks': recent_clicks[:20],  # Last 20 clicks
+        'all_posts': all_posts  # NEW: All posts with full details
+    }
 
 @app.get("/api/public-url")
 async def get_public_url_endpoint():
     """Get the current public Railway URL."""
-    public_url = get_public_url()
-    
     return {
-        "public_url": public_url,
-        "is_railway": "railway" in public_url.lower() or PUBLIC_URL != "",
+        "public_url": PUBLIC_URL,
+        "is_railway": "railway" in PUBLIC_URL.lower(),
         "status": "online",
         "message": "Production URL ready for social media posts",
-        "final_destination": FINAL_DESTINATION
+        "final_destination": FINAL_DESTINATION,
+        "environment": {
+            "RAILWAY_PUBLIC_DOMAIN": os.getenv("RAILWAY_PUBLIC_DOMAIN", "Not set"),
+            "RAILWAY_STATIC_URL": os.getenv("RAILWAY_STATIC_URL", "Not set"),
+            "PORT": PORT
+        }
     }
 
 @app.get("/api/debug/{tracking_id}")
@@ -419,6 +601,7 @@ async def debug_tracking(tracking_id: str):
             "post_data": post_data,
             "history_clicks_count": history_clicks,
             "stored_clicks": post_data.get("clicks", 0),
+            "confirmed": post_data.get("confirmed", False),
             "matches": history_clicks == post_data.get("clicks", 0)
         }
     
@@ -446,17 +629,19 @@ async def reset_all():
 @app.get("/health")
 async def health():
     """Health check for Railway."""
-    public_url = get_public_url()
+    confirmed_posts = sum(1 for p in click_data["posts"].values() if p.get("confirmed", False))
+    pending_posts = len(click_data["posts"]) - confirmed_posts
     
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "total_posts": len(click_data["posts"]),
+        "total_posts": confirmed_posts,
+        "pending_posts": pending_posts,
         "total_clicks": click_data["total_clicks"],
         "bot_requests_blocked": click_data.get("bot_requests_blocked", 0),
-        "public_url": public_url,
-        "is_production": PUBLIC_URL != "",
-        "version": "5.0_railway_fastapi"
+        "public_url": PUBLIC_URL,
+        "is_production": "railway" in PUBLIC_URL.lower(),
+        "version": "5.1_railway_fixed"
     }
 
 @app.get("/api/test-bot-detection")
