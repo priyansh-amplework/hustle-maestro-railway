@@ -35,7 +35,7 @@ app.add_middleware(
 
 # Configuration
 FINAL_DESTINATION = "https://nonai.life/"
-PORT = int(os.getenv("PORT", 5000))
+PORT = int(os.getenv("PORT", 10000))
 DATABASE_URL = os.getenv("DATABASE_URL")  # Render provides this
 
 if not DATABASE_URL:
@@ -508,8 +508,10 @@ async def get_analytics():
             recent_clicks = cur.fetchall()
             
             # Pending posts count
-            cur.execute("SELECT COUNT(*) FROM posts WHERE confirmed = FALSE")
-            pending_posts = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) as count FROM posts WHERE confirmed = FALSE")
+            pending_result = cur.fetchone()
+            pending_posts = pending_result['count'] if pending_result else 0
             
             # Posts with/without clicks
             posts_with_clicks = sum(1 for p in posts if p['clicks'] > 0)
