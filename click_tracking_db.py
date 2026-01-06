@@ -300,9 +300,9 @@ async def index():
         }
     }
 
-@app.get("/track/{tracking_id}")
+"""@app.get("/track/{tracking_id}")
 async def track_click(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
-    """Track clicks with BOT DETECTION - Only for confirmed posts"""
+    #Track clicks with BOT DETECTION - Only for confirmed posts
     try:
         user_agent = request.headers.get('user-agent', '')
         ip = request.headers.get('x-forwarded-for', request.client.host)
@@ -322,8 +322,75 @@ async def track_click(tracking_id: str, request: Request, p: str = "unknown", b:
             cur = conn.cursor(cursor_factory=RealDictCursor)
             
             # Check if post exists and is confirmed
-            cur.execute("""
+            cur.execute(
                 SELECT clicks, confirmed FROM posts 
+                WHERE tracking_id = %s
+           , (tracking_id,))
+            post = cur.fetchone()
+            
+            if not post or not post['confirmed']:
+                print(f"⚠️ Post not found or not confirmed: {tracking_id}")
+                return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
+            
+            # Update clicks
+            now = datetime.now()
+            cur.execute(
+                UPDATE posts 
+                SET clicks = clicks + 1,
+                    last_click = %s,
+                    first_click = COALESCE(first_click, %s)
+                WHERE tracking_id = %s
+                RETURNING clicks
+           , (now, now, tracking_id))
+            
+            new_click_count = cur.fetchone()['clicks']
+            
+            # Insert click history
+            cur.execute(
+                INSERT INTO click_history 
+                (tracking_id, platform, badge_type, ip, user_agent, is_human)
+                VALUES (%s, %s, %s, %s, %s, %s)
+           , (tracking_id, p, b, ip[:15] if ip else "unknown", user_agent[:100], True))
+            
+            conn.commit()
+            
+            print(f"🖱️ REAL HUMAN CLICK")
+            print(f"   Tracking ID: {tracking_id}, Total Clicks: {new_click_count}")
+        
+        return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
+        
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return RedirectResponse(url=FINAL_DESTINATION, status_code=302)"""
+
+
+
+@app.get("/track/{tracking_id}")
+async def track_click(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
+    """Track clicks with BOT DETECTION + Timing Check"""
+    try:
+        user_agent = request.headers.get('user-agent', '')
+        ip = request.headers.get('x-forwarded-for', request.client.host)
+        
+        clean_ip_tracker()
+        
+        # Bot detection
+        if is_bot_request(user_agent, ip):
+            increment_bot_counter()
+            print(f"🤖 BLOCKED Bot/Preview: {tracking_id}")
+            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
+        
+        # Rate limiting
+        if is_rate_limited(ip, tracking_id):
+            print(f"🚫 Rate limited: {tracking_id} from {ip}")
+            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
+        
+        with get_db_connection() as conn:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Check if post exists and is confirmed
+            cur.execute("""
+                SELECT clicks, confirmed, confirmed_at FROM posts 
                 WHERE tracking_id = %s
             """, (tracking_id,))
             post = cur.fetchone()
@@ -331,6 +398,15 @@ async def track_click(tracking_id: str, request: Request, p: str = "unknown", b:
             if not post or not post['confirmed']:
                 print(f"⚠️ Post not found or not confirmed: {tracking_id}")
                 return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
+            
+            # 🔥 NEW: Check if this is within grace period (30 seconds after posting)
+            confirmed_at = post['confirmed_at']
+            if confirmed_at:
+                time_since_post = (datetime.now() - confirmed_at).total_seconds()
+                if time_since_post < 30:
+                    increment_bot_counter()
+                    print(f"🤖 BLOCKED: Click too soon after posting ({time_since_post:.1f}s) - likely bot preview")
+                    return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
             
             # Update clicks
             now = datetime.now()
