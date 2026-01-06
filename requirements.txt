@@ -60,7 +60,8 @@ pyasn1
 pyasn1_modules               
 pydantic                    
 pydantic_core              
-pydeck                     
+pydeck    
+psycopg2
 pyngrok                    
 pyparsing               
 pyperclip                 
