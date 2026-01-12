@@ -61,7 +61,8 @@ pyasn1_modules
 pydantic                    
 pydantic_core              
 pydeck                     
-pyngrok                    
+pyngrok    
+psycopg2
 pyparsing               
 pyperclip                 
 python-dateutil             
