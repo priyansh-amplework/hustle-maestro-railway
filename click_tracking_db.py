@@ -1,6 +1,6 @@
 """
-click_tracking_postgres.py - PostgreSQL VERSION
-Tracks clicks using PostgreSQL on Render instead of JSON files
+click_tracking_postgres.py - PostgreSQL VERSION with SHORT URLs
+Tracks clicks using PostgreSQL on Render with 6-character tracking IDs
 """
 
 from fastapi import FastAPI, Request, HTTPException
@@ -11,7 +11,8 @@ from typing import Optional, Dict, List
 import os
 from datetime import datetime
 from urllib.parse import urlencode
-import hashlib
+import string
+import random
 import re
 import time
 import psycopg2
@@ -20,8 +21,8 @@ from contextlib import contextmanager
 
 app = FastAPI(
     title="NoNAI Click Tracking",
-    description="Click tracking service with PostgreSQL storage",
-    version="6.0_postgres"
+    description="Click tracking service with PostgreSQL storage and SHORT URLs",
+    version="7.0_short_urls"
 )
 
 # CORS Configuration
@@ -106,16 +107,63 @@ def get_db_connection():
     finally:
         conn.close()
 
-# Database Schema Initialization
-def init_database():
-    """Create tables if they don't exist"""
+# SHORT URL GENERATION
+def generate_short_id(length=6):
+    """
+    Generate a SHORT random tracking ID.
+    Examples: 'aB3xK9', 'mZ8pQ2', 'xY4nM1'
+    
+    Uses: a-z, A-Z, 0-9 (62 possible characters)
+    6 characters = 62^6 = 56 billion combinations
+    
+    Args:
+        length: Length of the ID (default 6 characters)
+    
+    Returns:
+        str: Random alphanumeric string
+    """
+    characters = string.ascii_letters + string.digits  # a-z, A-Z, 0-9
+    return ''.join(random.choices(characters, k=length))
+
+
+def generate_unique_short_id(length=6, max_attempts=10):
+    """
+    Generate a unique short ID that doesn't already exist in database.
+    
+    Args:
+        length: Length of the ID (default 6)
+        max_attempts: Maximum attempts to find unique ID (default 10)
+    
+    Returns:
+        str: Unique short ID
+    """
     with get_db_connection() as conn:
         cur = conn.cursor()
         
-        # Posts table
+        for attempt in range(max_attempts):
+            short_id = generate_short_id(length)
+            
+            # Check if ID already exists
+            cur.execute("SELECT tracking_id FROM posts WHERE tracking_id = %s", (short_id,))
+            
+            if cur.fetchone() is None:
+                return short_id
+        
+        # If we can't find unique ID in max_attempts, increase length by 1
+        print(f"⚠️ Could not find unique {length}-char ID in {max_attempts} attempts, trying {length+1} chars")
+        return generate_unique_short_id(length + 1, max_attempts)
+
+
+# Database Schema Initialization
+def init_database():
+    """Create tables if they don't exist - UPDATED for shorter tracking_id"""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        
+        # Posts table - tracking_id now VARCHAR(10) for short IDs
         cur.execute("""
             CREATE TABLE IF NOT EXISTS posts (
-                tracking_id VARCHAR(16) PRIMARY KEY,
+                tracking_id VARCHAR(10) PRIMARY KEY,
                 username VARCHAR(255),
                 badge_type VARCHAR(50),
                 platform VARCHAR(50),
@@ -133,7 +181,7 @@ def init_database():
         cur.execute("""
             CREATE TABLE IF NOT EXISTS click_history (
                 id SERIAL PRIMARY KEY,
-                tracking_id VARCHAR(16),
+                tracking_id VARCHAR(10),
                 timestamp TIMESTAMP DEFAULT NOW(),
                 platform VARCHAR(50),
                 badge_type VARCHAR(50),
@@ -248,12 +296,13 @@ def get_bot_counter():
 async def startup_event():
     """Initialize database on startup"""
     print("="*70)
-    print("🐘 CLICK TRACKING WITH POSTGRESQL")
+    print("🐘 CLICK TRACKING WITH POSTGRESQL + SHORT URLs")
     print("="*70)
     print(f"📍 Port: {PORT}")
     print(f"🌐 Public URL: {PUBLIC_URL}")
     print(f"🎯 Redirects to: {FINAL_DESTINATION}")
     print(f"🗄️ Database: PostgreSQL on Render")
+    print(f"✂️ Short URLs: 6-character tracking IDs (e.g., /t/aB3xK9)")
     
     try:
         init_database()
@@ -287,11 +336,12 @@ async def index():
     return {
         "service": "NoNAI Click Tracking",
         "status": "running",
-        "version": "6.0_postgres",
+        "version": "7.0_short_urls",
         "database": "PostgreSQL",
         "public_url": PUBLIC_URL,
+        "url_format": "Short 6-character IDs (e.g., /t/aB3xK9)",
         "endpoints": {
-            "track": "/track/{tracking_id}",
+            "track": "/t/{tracking_id} (SHORT URL)",
             "analytics": "/api/analytics",
             "health": "/health",
             "generate_url": "/api/generate-tracking-url (POST)",
@@ -300,74 +350,12 @@ async def index():
         }
     }
 
-"""@app.get("/track/{tracking_id}")
+@app.get("/t/{tracking_id}")
 async def track_click(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
-    #Track clicks with BOT DETECTION - Only for confirmed posts
-    try:
-        user_agent = request.headers.get('user-agent', '')
-        ip = request.headers.get('x-forwarded-for', request.client.host)
-        
-        clean_ip_tracker()
-        
-        if is_bot_request(user_agent, ip):
-            increment_bot_counter()
-            print(f"🤖 BLOCKED Bot/Preview: {tracking_id}")
-            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
-        
-        if is_rate_limited(ip, tracking_id):
-            print(f"🚫 Rate limited: {tracking_id} from {ip}")
-            return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
-        
-        with get_db_connection() as conn:
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            
-            # Check if post exists and is confirmed
-            cur.execute(
-                SELECT clicks, confirmed FROM posts 
-                WHERE tracking_id = %s
-           , (tracking_id,))
-            post = cur.fetchone()
-            
-            if not post or not post['confirmed']:
-                print(f"⚠️ Post not found or not confirmed: {tracking_id}")
-                return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
-            
-            # Update clicks
-            now = datetime.now()
-            cur.execute(
-                UPDATE posts 
-                SET clicks = clicks + 1,
-                    last_click = %s,
-                    first_click = COALESCE(first_click, %s)
-                WHERE tracking_id = %s
-                RETURNING clicks
-           , (now, now, tracking_id))
-            
-            new_click_count = cur.fetchone()['clicks']
-            
-            # Insert click history
-            cur.execute(
-                INSERT INTO click_history 
-                (tracking_id, platform, badge_type, ip, user_agent, is_human)
-                VALUES (%s, %s, %s, %s, %s, %s)
-           , (tracking_id, p, b, ip[:15] if ip else "unknown", user_agent[:100], True))
-            
-            conn.commit()
-            
-            print(f"🖱️ REAL HUMAN CLICK")
-            print(f"   Tracking ID: {tracking_id}, Total Clicks: {new_click_count}")
-        
-        return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return RedirectResponse(url=FINAL_DESTINATION, status_code=302)"""
-
-
-
-@app.get("/track/{tracking_id}")
-async def track_click(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
-    """Track clicks with BOT DETECTION + Timing Check"""
+    """
+    Track clicks with BOT DETECTION + Timing Check
+    SHORT URL: /t/{6-char-id} instead of /track/{long-hash}
+    """
     try:
         user_agent = request.headers.get('user-agent', '')
         ip = request.headers.get('x-forwarded-for', request.client.host)
@@ -399,7 +387,7 @@ async def track_click(tracking_id: str, request: Request, p: str = "unknown", b:
                 print(f"⚠️ Post not found or not confirmed: {tracking_id}")
                 return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
             
-            # 🔥 NEW: Check if this is within grace period (30 seconds after posting)
+            # Check if this is within grace period (30 seconds after posting)
             confirmed_at = post['confirmed_at']
             if confirmed_at:
                 time_since_post = (datetime.now() - confirmed_at).total_seconds()
@@ -439,13 +427,21 @@ async def track_click(tracking_id: str, request: Request, p: str = "unknown", b:
         print(f"❌ Error: {e}")
         return RedirectResponse(url=FINAL_DESTINATION, status_code=302)
 
+# Legacy endpoint for backward compatibility
+@app.get("/track/{tracking_id}")
+async def track_click_legacy(tracking_id: str, request: Request, p: str = "unknown", b: str = "unknown"):
+    """Legacy endpoint - redirects to short URL handler"""
+    return await track_click(tracking_id, request, p, b)
+
 @app.post("/api/generate-tracking-url")
 async def generate_tracking_url(data: TrackingURLRequest):
-    """Generate tracking URL - PENDING until confirmed"""
+    """
+    Generate SHORT tracking URL - PENDING until confirmed
+    Returns URL like: https://your-server.com/t/aB3xK9
+    """
     try:
-        tracking_id = hashlib.md5(
-            f"{data.platform}_{data.badge_type}_{datetime.now().timestamp()}_{os.urandom(4).hex()}".encode()
-        ).hexdigest()[:8]
+        # Generate SHORT 6-character tracking ID
+        tracking_id = generate_unique_short_id(length=6)
         
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -456,10 +452,13 @@ async def generate_tracking_url(data: TrackingURLRequest):
             """, (tracking_id, data.username, data.badge_type, data.platform, False))
             conn.commit()
         
-        params = {'p': data.platform[:3], 'b': data.badge_type[:1]}
-        tracking_url = f"{PUBLIC_URL}/track/{tracking_id}?{urlencode(params)}"
+        # Create SHORT tracking URL with /t/ prefix
+        # No query parameters needed in URL anymore - cleaner look!
+        tracking_url = f"{PUBLIC_URL}/t/{tracking_id}"
         
-        print(f"📝 Generated tracking URL (pending confirmation): {tracking_id}")
+        print(f"📝 Generated SHORT tracking URL (pending): {tracking_id}")
+        print(f"   Full URL: {tracking_url}")
+        print(f"   Length: {len(tracking_url)} characters")
         
         return {
             "tracking_id": tracking_id,
@@ -472,6 +471,11 @@ async def generate_tracking_url(data: TrackingURLRequest):
                 "tracking_id": tracking_id,
                 "initial_clicks": 0,
                 "confirmed": False
+            },
+            "url_info": {
+                "format": "short",
+                "length": len(tracking_url),
+                "example": f"/t/{tracking_id}"
             }
         }
         
@@ -584,7 +588,6 @@ async def get_analytics():
             recent_clicks = cur.fetchall()
             
             # Pending posts count
-            
             cur.execute("SELECT COUNT(*) as count FROM posts WHERE confirmed = FALSE")
             pending_result = cur.fetchone()
             pending_posts = pending_result['count'] if pending_result else 0
@@ -598,6 +601,7 @@ async def get_analytics():
         for post in posts:
             all_posts.append({
                 'tracking_id': post['tracking_id'],
+                'tracking_url': f"{PUBLIC_URL}/t/{post['tracking_id']}",
                 'username': post['username'] or 'Unknown',
                 'post_url': post['post_url'] or 'N/A',
                 'platform': post['platform'] or 'unknown',
@@ -614,6 +618,7 @@ async def get_analytics():
             recent_clicks_formatted.append({
                 'timestamp': click['timestamp'].isoformat(),
                 'tracking_id': click['tracking_id'],
+                'tracking_url': f"{PUBLIC_URL}/t/{click['tracking_id']}",
                 'post_url': click['post_url'] or 'N/A',
                 'platform': click['platform'] or 'unknown',
                 'badge_type': click['badge_type'] or 'unknown',
@@ -639,7 +644,8 @@ async def get_analytics():
                 'total_requests': (totals['total_clicks'] or 0) + get_bot_counter(),
                 'confirmed_posts': totals['total_posts'] or 0,
                 'pending_posts': pending_posts
-            }
+            },
+            'url_format': 'short_6_char'
         }
         
     except Exception as e:
@@ -656,7 +662,8 @@ async def get_public_url_endpoint():
         "is_railway": "railway" in PUBLIC_URL.lower(),
         "status": "online",
         "message": "Production URL ready for social media posts",
-        "final_destination": FINAL_DESTINATION
+        "final_destination": FINAL_DESTINATION,
+        "url_format": "SHORT - 6 characters (e.g., /t/aB3xK9)"
     }
 
 @app.post("/api/reset-all")
@@ -708,7 +715,8 @@ async def health():
             "public_url": PUBLIC_URL,
             "database": "PostgreSQL",
             "is_production": "railway" in PUBLIC_URL.lower(),
-            "version": "6.0_postgres"
+            "version": "7.0_short_urls",
+            "url_format": "6-character IDs"
         }
     except Exception as e:
         return {
